@@ -5,77 +5,75 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+	"strconv"
 	"time"
 )
 
+const loginURL = "https://controller.access.network/portal_api.php"
+
 func main() {
-	// read the ./identifiants.txt file
-	username, password := getCreds()
-
-	client := &Client{
-		LoginURL:            "https://controller.access.network/portal_api.php",
-		LoginUsername:       username,
-		LoginPassword:       password,
-		PingIntervalSeconds: 50,
+	// entry: [n]
+	// [arg1] (aka the reqType)
+	// [arg2]
+	// ...
+	// [argn]
+	scanner := bufio.NewScanner(os.Stdin)
+	var n int
+	var err error
+	scanner.Scan()
+	n, err = strconv.Atoi(scanner.Text())
+	if err != nil {
+		fmt.Println("Couldn't find n")
+		os.Exit(1)
+		return
 	}
-	client.Login()
-	client.StartTicking()
 
-	// Wait here until CTRL-C or other term signal is received.
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
-
-	client.Logout()
-}
-
-func getCreds() (string, string) {
-	var username, password string
-
-	// Check if WIFI_CREDS environment variable is set
-	if creds, ok := os.LookupEnv("WIFI_CREDS"); ok {
-		lines := strings.Split(creds, "\n")
-		if len(lines) >= 2 {
-			username, password = lines[0], lines[1]
-		} else {
-			log.Fatal("Invalid WIFI_CREDS format")
-		}
-	} else {
-		// Read from identifiants.txt file
-		file, err := os.Open("identifiants.txt")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		if scanner.Scan() {
-			username = scanner.Text()
-		} else {
-			log.Fatal("Error reading username from file")
-		}
-
-		if scanner.Scan() {
-			password = scanner.Text()
-		} else {
-			log.Fatal("Error reading password from file")
-		}
-
-		if err := scanner.Err(); err != nil {
-			log.Fatal(err)
-		}
+	if n < 1 {
+		fmt.Println("n too small")
+		os.Exit(1)
+		return
 	}
-	return username, password
+
+	args := make([]string, n)
+	for i := range args {
+		scanner.Scan()
+		args[i] = scanner.Text()
+	}
+
+	reqType := args[0]
+	switch reqType {
+	case "login":
+		if n != 3 {
+			fmt.Println("n too small: want 2 arguments, the username and the password")
+			os.Exit(1)
+			return
+		}
+		client := Client{}
+		client.Login(args[1], args[2])
+		break
+	case "logout", "ping":
+		if n != 3 {
+			fmt.Println("n too small: want 2 arguments, the username and digest")
+			os.Exit(1)
+			return
+		}
+		client := Client{}
+		if reqType == "logout" {
+			client.Logout(args[1], args[2])
+		} else if reqType == "ping" {
+			client.Ping(args[1], args[2])
+		}
+		break
+	default:
+		fmt.Println("invalid request type")
+		os.Exit(1)
+		return
+	}
 }
 
 // =================================================================================================
@@ -176,11 +174,6 @@ type LoginResponse struct {
 }
 
 type Client struct {
-	LoginURL            string
-	LoginUsername       string
-	LoginPassword       string
-	PingIntervalSeconds int
-	passwordDigest      string
 }
 
 func (c *Client) newUnsecureHTTPClient() *http.Client {
@@ -198,12 +191,12 @@ func (c *Client) newUnsecureHTTPClient() *http.Client {
 	return client
 }
 
-func (c *Client) Login() error {
+func (c *Client) Login(username string, password string) error {
 	client := c.newUnsecureHTTPClient()
 
-	body := []byte(fmt.Sprintf(`action=authenticate&login=%s&password=%s&policy_accept=false`, url.QueryEscape(c.LoginUsername), url.QueryEscape(c.LoginPassword)))
+	body := []byte(fmt.Sprintf(`action=authenticate&login=%s&password=%s&policy_accept=false`, url.QueryEscape(username), url.QueryEscape(password)))
 
-	r, err := http.NewRequest("POST", c.LoginURL, bytes.NewBuffer(body))
+	r, err := http.NewRequest("POST", loginURL, bytes.NewBuffer(body))
 	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(r)
@@ -232,24 +225,20 @@ func (c *Client) Login() error {
 		return err
 	}
 	// check that the stuff is actually defined till the password digest
-	c.passwordDigest = loginResponse.User.PasswordDigest.Value
+	username = loginResponse.User.Login.Value
+	passwordDigest := loginResponse.User.PasswordDigest.Value
 
-	if c.passwordDigest == "" {
-		fmt.Println("Incorrect credentials")
-		return errors.New("invalid credentials")
-	}
-
-	fmt.Printf("Response: %+v\n", loginResponse)
+	fmt.Println(username)
+	fmt.Println(passwordDigest)
 	return nil
 }
 
-func (c *Client) Ping() error {
-	fmt.Println("Pinging...")
+func (c *Client) Ping(username string, passwordDigest string) error {
 	client := c.newUnsecureHTTPClient()
 
-	body := []byte(fmt.Sprintf(`action=refresh&login=%s&password_digest=%s&policy_accept=false`, url.QueryEscape(c.LoginUsername), url.QueryEscape(c.passwordDigest)))
+	body := []byte(fmt.Sprintf(`action=refresh&login=%s&password_digest=%s&policy_accept=false`, url.QueryEscape(username), url.QueryEscape(passwordDigest)))
 
-	r, err := http.NewRequest("POST", c.LoginURL, bytes.NewBuffer(body))
+	r, err := http.NewRequest("POST", loginURL, bytes.NewBuffer(body))
 	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(r)
@@ -271,27 +260,15 @@ func (c *Client) Ping() error {
 		return fmt.Errorf("[pinging] Error response status code: %d", resp.StatusCode)
 	}
 
-	// var loginResponse LoginResponse
-	// err = json.Unmarshal(bodyBytes, &loginResponse)
-	// if err != nil {
-	// 	fmt.Println("Error unmarshalling response:", err)
-	// 	return err
-	// }
-	// loginResponse := string(bodyBytes)
-
-	// fmt.Printf("Response: %+v\n", loginResponse)
-
-	// fmt.Println("Response status code:", resp.StatusCode)
 	return nil
 }
 
-func (c *Client) Logout() error {
-	fmt.Println("Logging out...")
+func (c *Client) Logout(username string, passwordDigest string) error {
 	client := c.newUnsecureHTTPClient()
 
-	body := []byte(fmt.Sprintf(`action=disconnect&login=%s&password_digest=%s`, url.QueryEscape(c.LoginUsername), url.QueryEscape(c.passwordDigest)))
+	body := []byte(fmt.Sprintf(`action=disconnect&login=%s&password_digest=%s`, url.QueryEscape(username), url.QueryEscape(passwordDigest)))
 
-	r, err := http.NewRequest("POST", c.LoginURL, bytes.NewBuffer(body))
+	r, err := http.NewRequest("POST", loginURL, bytes.NewBuffer(body))
 	r.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(r)
@@ -316,11 +293,12 @@ func (c *Client) Logout() error {
 	return nil
 }
 
-func (c *Client) StartTicking() error {
+func (c *Client) StartTicking(username string, passwordDigest string) error {
+	interval := 50
 	go func() {
-		ticker := time.NewTicker(time.Second * time.Duration(c.PingIntervalSeconds))
+		ticker := time.NewTicker(time.Second * time.Duration(interval))
 		for range ticker.C {
-			c.Ping()
+			c.Ping(username, passwordDigest)
 		}
 	}()
 	return nil
